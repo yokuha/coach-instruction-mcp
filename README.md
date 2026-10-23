@@ -35,7 +35,7 @@ git init -b main
 git add .
 git commit -m "Coach-Claudi-Anweisungen"
 # Projekt auf gitlab.com anlegen (privat!), dann:
-git remote add origin git@gitlab.com:DEIN-NAME/coach-claudi.git
+git remote add origin git@gitlab.com:<group>/<project>.git
 git push -u origin main
 ```
 
