@@ -9,8 +9,7 @@ Group=coach-mcp
 EnvironmentFile=/etc/coach-mcp.env
 Environment=HOME=/var/lib/coach-mcp
 StateDirectory=coach-mcp
-WorkingDirectory=/opt/coach-mcp
-ExecStart=/opt/coach-mcp/venv/bin/python /opt/coach-mcp/server.py
+ExecStart=/opt/coach-mcp/venv/bin/coach-mcp
 Restart=on-failure
 RestartSec=5
 

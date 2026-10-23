@@ -12,14 +12,14 @@ Mac / Emacs ──git push──▶ gitlab.com ──Webhook──▶ VPS: coach
 
 ## Tools
 
-| Tool | Zweck |
-|---|---|
-| `get_instructions` | Alle `.md`/`.txt`-Dateien (README zuerst) in einem Rutsch, mit Commit-Stand |
-| `list_instruction_files`, `read_instruction_file` | Einzeldateien |
-| `search_instructions` | Volltextsuche (optional Regex) |
-| `instructions_history` | `git log`, optional pro Datei |
-| `sync_instructions` | sofortiger Abgleich mit GitLab |
-| `write_instruction_file`, `replace_in_instruction_file` | nur mit `COACH_WRITE=1`; committet, hängt „(by Claude)“ an und pusht |
+| Tool                                                    | Zweck                                                                       |
+|---------------------------------------------------------|-----------------------------------------------------------------------------|
+| `get_instructions`                                      | Alle `.md`/`.txt`-Dateien (README zuerst) in einem Rutsch, mit Commit-Stand |
+| `list_instruction_files`, `read_instruction_file`       | Einzeldateien                                                               |
+| `search_instructions`                                   | Volltextsuche (optional Regex)                                              |
+| `instructions_history`                                  | `git log`, optional pro Datei                                               |
+| `sync_instructions`                                     | sofortiger Abgleich mit GitLab                                              |
+| `write_instruction_file`, `replace_in_instruction_file` | nur mit `COACH_WRITE=1`; committet, hängt „(by Claude)“ an und pusht        |
 
 Nur tracked Dateien werden ausgeliefert, Emacs-Backups (`*.~1~`) bleiben also außen vor,
 solange sie nicht eingecheckt sind (siehe `.gitignore` unten).
@@ -59,10 +59,10 @@ Ist `main` geschützt, den Key unter *Protected branches → Allowed to push* fr
 ## 3. Installation auf dem VPS
 
 ```sh
-sudo install -d /opt/coach-mcp
-sudo cp server.py requirements.txt /opt/coach-mcp/
+sudo git clone https://github.com/yokuha/coach-instruction-mcp.git /opt/coach-mcp/src
+cd /opt/coach-mcp/src
 sudo python3 -m venv /opt/coach-mcp/venv
-sudo /opt/coach-mcp/venv/bin/pip install -r /opt/coach-mcp/requirements.txt
+sudo /opt/coach-mcp/venv/bin/pip install .
 
 sudo cp deploy/coach-mcp.env.example /etc/coach-mcp.env
 sudo chmod 600 /etc/coach-mcp.env
@@ -76,6 +76,14 @@ curl -s http://127.0.0.1:8765/healthz
 ```
 
 Reverse Proxy und DNS: siehe `deploy/reverse-proxy.md`.
+
+Update auf eine neue Version:
+
+```sh
+cd /opt/coach-mcp/src && sudo git pull
+sudo /opt/coach-mcp/venv/bin/pip install .
+sudo systemctl restart coach-mcp
+```
 
 ## 4. GitLab-Webhook (sofortige Aktualisierung)
 
@@ -122,7 +130,7 @@ Ordners ersetzen, z. B.:
 ## Test ohne GitLab
 
 ```sh
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/python test_local.py
 ```
 

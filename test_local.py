@@ -71,7 +71,7 @@ async def main():
         "COACH_ALLOWED_HOSTS": f"127.0.0.1:{port},localhost:{port}",
         "COACH_GIT_EMAIL": "claudi@test",
     }
-    proc = subprocess.Popen([sys.executable, str(HERE / "server.py")], env=env,
+    proc = subprocess.Popen([sys.executable, str(HERE / "coach_mcp.py")], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         for _ in range(50):

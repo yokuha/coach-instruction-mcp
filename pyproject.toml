@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coach-instructions-mcp"
+version = "0.1.0"
+description = "MCP-Server, der die Anweisungen fuer Coach Claudi aus einem Git-Repository bereitstellt"
+readme = "README.md"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = ["mcp>=2.3,<3"]
+
+[project.scripts]
+coach-mcp = "coach_mcp:main"
+
+[tool.setuptools]
+py-modules = ["coach_mcp"]
