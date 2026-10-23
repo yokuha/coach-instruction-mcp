@@ -1,0 +1,27 @@
+[Unit]
+Description=Coach Claudi instructions MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=coach-mcp
+Group=coach-mcp
+EnvironmentFile=/etc/coach-mcp.env
+Environment=HOME=/var/lib/coach-mcp
+StateDirectory=coach-mcp
+WorkingDirectory=/opt/coach-mcp
+ExecStart=/opt/coach-mcp/venv/bin/python /opt/coach-mcp/server.py
+Restart=on-failure
+RestartSec=5
+
+# Haertung
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
