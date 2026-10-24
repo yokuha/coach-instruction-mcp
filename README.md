@@ -29,7 +29,7 @@ solange sie nicht eingecheckt sind (siehe `.gitignore` unten).
 Auf dem Mac, im Ordner `Coach Claudi`:
 
 ```sh
-cd <Ordner mit den Anweisungen>
+cd /Ordner/mit/den/Anweisungen
 printf '*~\n.#*\n.dir-locals.el\n' > .gitignore      # Backups raus; .dir-locals.el nach Wunsch behalten
 git init -b main
 git add .
@@ -39,7 +39,7 @@ git remote add origin git@gitlab.com:<group>/<project>.git
 git push -u origin main
 ```
 
-Das Repository sollte **privat** sein (persönliche Trainingsdaten stehen drin).
+Das Repository sollte **privat** sein (stehen persönliche Daten drin).
 
 ## 2. Deploy Key
 
@@ -97,7 +97,7 @@ Hintergrund-Abgleich (alle 5 min).
 *Einstellungen → Connectors → Benutzerdefinierten Connector hinzufügen*, URL:
 
 ```
-https://coach-mcp.domain.tld/<COACH_URL_TOKEN>/mcp
+https://coach-mcp.hostname.tld/<COACH_URL_TOKEN>/mcp
 ```
 
 Kein OAuth eintragen. Danach in den Projekt-Anweisungen den Abschnitt zum Lesen des lokalen
