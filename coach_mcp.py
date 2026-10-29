@@ -1,17 +1,19 @@
 """coach-instructions-mcp
 
-Kleiner MCP-Server (Streamable HTTP), der die Anweisungen fuer "Coach Claudi" aus einem
-Git-Repository (z. B. gitlab.com) bereitstellt.
+Small MCP server (Streamable HTTP) that serves the instructions for "Coach Claudi" from a
+Git repository (e.g. gitlab.com).
 
-* Haelt einen lokalen Clone aktuell (Webhook von GitLab + periodischer Abgleich + Abgleich
-  bei Zugriff, wenn der letzte Abgleich aelter als COACH_SYNC_TTL Sekunden ist).
-* Lese-Tools: get_instructions, list_instruction_files, read_instruction_file,
+* Keeps a local clone up to date (GitLab webhook + periodic sync + sync on access when the
+  last sync is older than COACH_SYNC_TTL seconds).
+* Read tools: get_instructions, list_instruction_files, read_instruction_file,
   search_instructions, instructions_history, sync_instructions.
-* Schreib-Tools (nur wenn COACH_WRITE=1): write_instruction_file,
-  replace_in_instruction_file. Jede Aenderung wird committed und gepusht; die Git-Historie ist
-  das Rueckgaengig-Werkzeug.
+* Write tools (only with COACH_WRITE=1): write_instruction_file,
+  replace_in_instruction_file. Every change is committed and pushed; the Git history is the
+  undo tool.
 
-Konfiguration ausschliesslich ueber Umgebungsvariablen, siehe deploy/coach-mcp.env.example.
+Tool descriptions and tool output are German on purpose (that is what Claude sees).
+
+Configured via environment variables only, see deploy/coach-mcp.env.example.
 """
 
 from __future__ import annotations
@@ -35,26 +37,26 @@ from starlette.responses import JSONResponse, Response
 
 log = logging.getLogger("coach-mcp")
 
-# --------------------------------------------------------------------------- Konfiguration
+# --------------------------------------------------------------------------- Configuration
 
 
 def _env(name: str, default: str | None = None, required: bool = False) -> str:
     value = os.environ.get(name, default)
     if required and not value:
-        raise SystemExit(f"Umgebungsvariable {name} fehlt (siehe deploy/coach-mcp.env.example)")
+        raise SystemExit(f"Environment variable {name} is missing (see deploy/coach-mcp.env.example)")
     return value or ""
 
 
 REPO_URL = _env("COACH_REPO_URL", required=True)
 REPO_DIR = Path(_env("COACH_REPO_DIR", "/var/lib/coach-mcp/repo"))
 BRANCH = _env("COACH_BRANCH", "main")
-SSH_KEY = _env("COACH_SSH_KEY")  # Pfad zum Deploy-Key (privat); leer = Standard-SSH-Konfiguration
-URL_TOKEN = _env("COACH_URL_TOKEN", required=True)  # geheimer Pfadteil der MCP-URL
-BEARER_TOKEN = _env("COACH_BEARER_TOKEN")  # optional zusaetzlich: Authorization: Bearer ...
-WEBHOOK_TOKEN = _env("COACH_WEBHOOK_TOKEN")  # GitLab "Secret token" (Header X-Gitlab-Token)
+SSH_KEY = _env("COACH_SSH_KEY")  # path to the (private) deploy key; empty = default SSH config
+URL_TOKEN = _env("COACH_URL_TOKEN", required=True)  # secret path segment of the MCP URL
+BEARER_TOKEN = _env("COACH_BEARER_TOKEN")  # optional additional check: Authorization: Bearer ...
+WEBHOOK_TOKEN = _env("COACH_WEBHOOK_TOKEN")  # GitLab "Secret token" (header X-Gitlab-Token)
 WRITE_ENABLED = _env("COACH_WRITE", "0") == "1"
-SYNC_TTL = float(_env("COACH_SYNC_TTL", "20"))  # Sekunden, bei Zugriff hoechstens so oft pullen
-SYNC_INTERVAL = float(_env("COACH_SYNC_INTERVAL", "300"))  # Hintergrund-Abgleich
+SYNC_TTL = float(_env("COACH_SYNC_TTL", "20"))  # seconds; on access pull at most this often
+SYNC_INTERVAL = float(_env("COACH_SYNC_INTERVAL", "300"))  # background sync
 HOST = _env("COACH_HOST", "127.0.0.1")
 PORT = int(_env("COACH_PORT", "8765"))
 ALLOWED_HOSTS = [h.strip() for h in _env("COACH_ALLOWED_HOSTS").split(",") if h.strip()]
@@ -65,9 +67,9 @@ MAX_FILE_BYTES = 200_000
 MAX_SEARCH_HITS = 50
 
 if len(URL_TOKEN) < 24:
-    raise SystemExit("COACH_URL_TOKEN muss mindestens 24 Zeichen lang sein (z. B. openssl rand -hex 24)")
+    raise SystemExit("COACH_URL_TOKEN must be at least 24 characters long (e.g. openssl rand -hex 24)")
 
-# --------------------------------------------------------------------------- Git-Schicht
+# --------------------------------------------------------------------------- Git layer
 
 _lock = threading.RLock()
 _state = {"last_sync": 0.0, "last_error": ""}
@@ -104,11 +106,11 @@ def ensure_clone() -> None:
             return
         REPO_DIR.parent.mkdir(parents=True, exist_ok=True)
         _git("clone", "--branch", BRANCH, REPO_URL, str(REPO_DIR), timeout=180)
-        log.info("Repository geklont nach %s", REPO_DIR)
+        log.info("Cloned repository to %s", REPO_DIR)
 
 
 def sync(force: bool = False) -> str:
-    """Holt den Stand des Remote-Branches. Bei Fehlern bleibt der letzte Stand erhalten."""
+    """Fetches the remote branch. On errors the last state is kept."""
     with _lock:
         if not force and time.time() - _state["last_sync"] < SYNC_TTL:
             return "cached"
@@ -121,7 +123,7 @@ def sync(force: bool = False) -> str:
             return "ok"
         except GitError as exc:
             _state["last_error"] = str(exc)
-            log.warning("Sync fehlgeschlagen: %s", exc)
+            log.warning("Sync failed: %s", exc)
             return f"error: {exc}"
 
 
@@ -142,7 +144,7 @@ def tracked_files() -> list[str]:
 
 
 def _safe_path(rel: str, must_exist: bool) -> Path:
-    """Prueft einen relativen Pfad (Schutz vor Pfad-Tricks, .git, falschen Endungen)."""
+    """Validates a relative path (guards against path tricks, .git and wrong extensions)."""
     p = PurePosixPath(rel.strip().replace("\\", "/"))
     if not rel.strip() or p.is_absolute() or ".." in p.parts or ".git" in p.parts:
         raise ValueError(f"Ungueltiger Pfad: {rel!r}")
@@ -157,7 +159,7 @@ def _safe_path(rel: str, must_exist: bool) -> Path:
 
 
 def _commit_and_push(rel: str, message: str) -> str:
-    """Committet die Datei und pusht. Bei Push-Konflikt: einmal rebase und erneut versuchen."""
+    """Commits the file and pushes. On a push conflict: rebase once and retry."""
     message = message.strip() or f"Update {rel}"
     if not message.endswith("(by Claude)"):
         message += " (by Claude)"
@@ -178,7 +180,7 @@ def _commit_and_push(rel: str, message: str) -> str:
     return f"Committet und gepusht: {head_info()}"
 
 
-# --------------------------------------------------------------------------- Tool-Logik (synchron)
+# --------------------------------------------------------------------------- Tool logic (synchronous)
 
 
 def _header() -> str:
@@ -274,7 +276,7 @@ def do_replace(path: str, old: str, new: str, message: str) -> str:
         return _commit_and_push(str(PurePosixPath(path.strip())), message)
 
 
-# --------------------------------------------------------------------------- MCP-Tools
+# --------------------------------------------------------------------------- MCP tools
 
 mcp = MCPServer(
     "coach-instructions",
@@ -350,11 +352,11 @@ if WRITE_ENABLED:
         return await _run(do_replace, path, old, new, commit_message)
 
 
-# --------------------------------------------------------------------------- HTTP-Huelle
+# --------------------------------------------------------------------------- HTTP wrapper
 
 
 class Gate:
-    """ASGI-Huelle: geheimer URL-Pfad, optionaler Bearer-Token, GitLab-Webhook, Healthcheck."""
+    """ASGI wrapper: secret URL path, optional bearer token, GitLab webhook, health check."""
 
     def __init__(self, app):
         self.app = app
@@ -380,7 +382,7 @@ class Gate:
                 await Response(status_code=404)(scope, receive, send)
                 return
             threading.Thread(target=sync, kwargs={"force": True}, daemon=True).start()
-            await Response("sync gestartet", status_code=202)(scope, receive, send)
+            await Response("sync started", status_code=202)(scope, receive, send)
             return
 
         segment = path.split("/")[1] if path.startswith("/") and len(path.split("/")) > 1 else ""
@@ -419,10 +421,10 @@ def build_app():
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     ensure_clone()
-    log.info("Erster Abgleich: %s", sync(force=True))
+    log.info("Initial sync: %s", sync(force=True))
     threading.Thread(target=_background_sync, daemon=True).start()
-    log.info("Schreiben %s, lausche auf %s:%s", "AKTIV" if WRITE_ENABLED else "aus", HOST, PORT)
-    # access_log=False: der geheime URL-Pfad soll nicht in Logdateien landen
+    log.info("Writing %s, listening on %s:%s", "ENABLED" if WRITE_ENABLED else "disabled", HOST, PORT)
+    # access_log=False: keep the secret URL path out of log files
     uvicorn.run(build_app(), host=HOST, port=PORT, access_log=False, log_level="info")
 
 

@@ -1,6 +1,6 @@
-"""Lokaler End-to-End-Test ohne GitLab: nutzt ein lokales Bare-Repo als "Remote".
+"""Local end-to-end test without GitLab: uses a local bare repository as the "remote".
 
-Aufruf:  python test_local.py
+Run:  python test_local.py
 """
 
 import asyncio
@@ -81,39 +81,39 @@ async def main():
             except Exception:
                 time.sleep(0.2)
         else:
-            raise SystemExit("Server startet nicht:\n" + proc.stdout.read())
+            raise SystemExit("Server does not start:\n" + proc.stdout.read())
 
         base = f"http://127.0.0.1:{port}"
         for bad in (f"{base}/falsch/mcp", f"{base}/mcp"):
             try:
                 urllib.request.urlopen(bad)
-                check("falscher Pfad wird abgelehnt", False)
+                check("wrong path is rejected", False)
             except urllib.error.HTTPError as e:
-                check(f"falscher Pfad {bad[len(base):]} -> 404", e.code == 404)
+                check(f"wrong path {bad[len(base):]} -> 404", e.code == 404)
 
         async with Client(f"{base}/{TOKEN}/mcp") as c:
             tools = {t.name for t in (await c.list_tools()).tools}
-            check("alle 8 Tools vorhanden", len(tools) == 8, tools)
+            check("all 8 tools present", len(tools) == 8, tools)
 
             err, text = await tool(c, "get_instructions")
-            check("get_instructions liefert README zuerst", text.index("README.md") < text.index("Allgemeine"), text[:300])
-            check("Emacs-Backup nicht enthalten", "Emacs-Backup" not in text)
-            check("Umlaute/Inhalt ok", "Jahrgang 1900" in text and "init" in text)
+            check("get_instructions returns README first", text.index("README.md") < text.index("Allgemeine"), text[:300])
+            check("Emacs backup not included", "Emacs-Backup" not in text)
+            check("umlauts/content ok", "Jahrgang 1900" in text and "init" in text)
 
             err, text = await tool(c, "search_instructions", query="testziel")
-            check("Suche findet Ziele.md", "Ziele.md:2" in text, text)
+            check("search finds Ziele.md", "Ziele.md:2" in text, text)
 
             err, text = await tool(c, "read_instruction_file", path="../etc/passwd")
-            check("Pfad-Trick abgelehnt", err, text)
+            check("path trick rejected", err, text)
             err, text = await tool(c, "read_instruction_file", path="Ziele.md.~1~")
-            check("Backup-Datei nicht lesbar", err, text)
+            check("backup file not readable", err, text)
 
-            # Aenderung von aussen (z. B. per git push vom Mac) kommt an
+            # external change (e.g. git push from the Mac) arrives
             (seed / "Ziele.md").write_text("# Ziele\nTestziel Alpha\nNeu von aussen\n")
             sh("git", "commit", "-am", "extern", cwd=seed)
             sh("git", "push", "origin", "HEAD:main", cwd=seed)
             err, text = await tool(c, "read_instruction_file", path="Ziele.md")
-            check("externer Push sichtbar", "Neu von aussen" in text, text)
+            check("external push visible", "Neu von aussen" in text, text)
 
             # Webhook
             req = urllib.request.Request(f"{base}/hook/gitlab", method="POST", headers={"X-Gitlab-Token": HOOK})
@@ -121,41 +121,41 @@ async def main():
             req = urllib.request.Request(f"{base}/hook/gitlab", method="POST", headers={"X-Gitlab-Token": "x"})
             try:
                 urllib.request.urlopen(req)
-                check("Webhook mit falschem Token abgelehnt", False)
+                check("webhook with wrong token rejected", False)
             except urllib.error.HTTPError as e:
-                check("Webhook mit falschem Token -> 404", e.code == 404)
+                check("webhook with wrong token -> 404", e.code == 404)
 
-            # Schreiben: replace
+            # writing: replace
             err, text = await tool(c, "replace_in_instruction_file", path="Ziele.md",
                                    old="Neu von aussen", new="Von Claudi geaendert", commit_message="Ziele praezisiert")
-            check("replace committet und pusht", not err and "Committet" in text, text)
+            check("replace commits and pushes", not err and "Committet" in text, text)
             err, text = await tool(c, "replace_in_instruction_file", path="Ziele.md",
                                    old="gibt es nicht", new="x", commit_message="x")
-            check("replace ohne Treffer scheitert", err, text)
+            check("replace without match fails", err, text)
             err, text = await tool(c, "write_instruction_file", path="neu/Training.md",
                                    content="# Neu\nÄnderung mit Umlauten ß\n", commit_message="Neue Datei")
-            check("write neue Datei in Unterordner", not err and "Committet" in text, text)
+            check("write new file in subfolder", not err and "Committet" in text, text)
             err, text = await tool(c, "write_instruction_file", path="skript.sh", content="rm -rf", commit_message="x")
-            check("falsche Endung abgelehnt", err, text)
+            check("wrong extension rejected", err, text)
             err, text = await tool(c, "write_instruction_file", path=".git/config", content="x", commit_message="x")
-            check(".git abgelehnt", err, text)
+            check(".git rejected", err, text)
 
             sh("git", "pull", "--rebase", "origin", "main", cwd=seed)
-            check("Remote hat Claudi-Aenderung", "Von Claudi geaendert" in (seed / "Ziele.md").read_text())
+            check("remote has Claudi's change", "Von Claudi geaendert" in (seed / "Ziele.md").read_text())
             log = subprocess.run(["git", "log", "--format=%s", "-3"], cwd=seed, capture_output=True, text=True).stdout
-            check("Commit-Nachricht mit (by Claude)", "Neue Datei (by Claude)" in log, log)
+            check("commit message with (by Claude)", "Neue Datei (by Claude)" in log, log)
 
-            # Konflikt: seed aendert dieselbe Zeile, Server soll sauber scheitern
+            # conflict: seed changes the same line, the server must fail cleanly
             (seed / "Ziele.md").write_text("# Ziele\nKonflikt-Variante\n")
             sh("git", "commit", "-am", "konflikt", cwd=seed)
             sh("git", "push", "origin", "HEAD:main", cwd=seed)
             err, text = await tool(c, "replace_in_instruction_file", path="Ziele.md",
                                    old="Von Claudi geaendert", new="egal", commit_message="x")
-            check("veralteter Text -> sauberer Fehler statt Datenverlust", err, text)
+            check("stale text -> clean error instead of data loss", err, text)
 
             err, text = await tool(c, "instructions_history", path="Ziele.md", limit=3)
             check("History", "konflikt" in text, text)
-        print("\nALLE TESTS BESTANDEN")
+        print("\nALL TESTS PASSED")
     finally:
         proc.terminate()
         proc.wait(5)

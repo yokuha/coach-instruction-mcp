@@ -9,11 +9,11 @@ Group=coach-mcp
 EnvironmentFile=/etc/coach-mcp.env
 Environment=HOME=/var/lib/coach-mcp
 StateDirectory=coach-mcp
-ExecStart=/opt/coach-mcp/venv/bin/coach-mcp
+ExecStart=/opt/coach-mcp/venv/bin/coach-instruction-mcp
 Restart=on-failure
 RestartSec=5
 
-# Haertung
+# Hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

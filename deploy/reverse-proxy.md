@@ -1,26 +1,28 @@
-# Reverse Proxy (Beispiele)
+# Reverse proxy (examples)
 
-Der Server lauscht nur auf 127.0.0.1:8765. TLS macht der Reverse Proxy, der auf dem VPS
-vermutlich schon fuer iicu-mcp.domain.tld laeuft. Es kommt nur ein weiterer Host dazu.
+The server only listens on 127.0.0.1:8765. TLS is handled by the reverse proxy; if one already
+runs on your server, you only add another host.
 
 ## Caddy
 
-    coach-mcp.domain.tld {
+    coach-mcp.example.com {
         reverse_proxy 127.0.0.1:8765
     }
 
-## nginx (nach certbot --nginx -d coach-mcp.domain.tld)
+## nginx (after `certbot --nginx -d coach-mcp.example.com`)
 
     server {
-        server_name coach-mcp.domain.tld;
+        server_name coach-mcp.example.com;
         location / {
             proxy_pass http://127.0.0.1:8765;
             proxy_set_header Host $host;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_read_timeout 120s;
         }
-        # TLS-Teile von certbot
+        # TLS parts added by certbot
     }
 
-DNS: A-Record (und AAAA falls IPv6) fuer `coach-mcp` bei Strato auf die VPS-IP.
-Den Namen der Subdomain kannst du frei waehlen; er muss nur zu COACH_ALLOWED_HOSTS passen.
+## DNS
+
+Create an A record (and AAAA for IPv6) for `coach-mcp` at your DNS provider pointing to the
+server's IP. The subdomain name is up to you; it just has to match `COACH_ALLOWED_HOSTS`.

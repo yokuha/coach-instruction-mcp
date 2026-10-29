@@ -1,49 +1,58 @@
 # coach-instructions-mcp
 
-MCP-Server, der die Anweisungen für Coach Claudi aus einem GitLab-Repository bereitstellt.
-Der Server hält auf dem VPS einen lokalen Clone aktuell; Claudi fragt ihn per Connector ab
-(Browser, iPhone, Desktop) und kann auf Wunsch Änderungen committen.
+An MCP server that serves the instructions for your AI coach ("Coach Claudi") from a Git
+repository. It runs on a small server (VPS or similar), keeps a local clone up to date, and
+Claude reads it through a custom connector — in the browser, on the iPhone and in the desktop
+app alike. Optionally, Claude can commit changes to the instructions.
 
 ```
-Mac / Emacs ──git push──▶ gitlab.com ──Webhook──▶ VPS: coach-mcp ◀──MCP── Claude (Claudi)
-                              ▲                      │ lokaler Clone
-                              └─────git push (nur wenn COACH_WRITE=1)─┘
+Mac / editor ──git push──▶ Git host ──webhook──▶ VPS: coach-mcp ◀──MCP── Claude
+                              ▲                    │ local clone
+                              └──── git push (only with COACH_WRITE=1) ┘
 ```
+
+## What you need
+
+* A **private** Git repository with your instructions as `.md`/`.txt` files
+  (GitLab, GitHub or any host reachable via SSH)
+* A Linux server with Python ≥ 3.10, `git`, systemd and a public hostname
+* A reverse proxy with TLS (Caddy or nginx), e.g. `coach-mcp.example.com`
+
+Setup takes about 30 minutes: steps 1–5 below.
 
 ## Tools
 
-| Tool                                                    | Zweck                                                                       |
-|---------------------------------------------------------|-----------------------------------------------------------------------------|
-| `get_instructions`                                      | Alle `.md`/`.txt`-Dateien (README zuerst) in einem Rutsch, mit Commit-Stand |
-| `list_instruction_files`, `read_instruction_file`       | Einzeldateien                                                               |
-| `search_instructions`                                   | Volltextsuche (optional Regex)                                              |
-| `instructions_history`                                  | `git log`, optional pro Datei                                               |
-| `sync_instructions`                                     | sofortiger Abgleich mit GitLab                                              |
-| `write_instruction_file`, `replace_in_instruction_file` | nur mit `COACH_WRITE=1`; committet, hängt „(by Claude)“ an und pusht        |
+| Tool                                                    | Purpose                                                                      |
+|---------------------------------------------------------|------------------------------------------------------------------------------|
+| `get_instructions`                                      | All `.md`/`.txt` files (README first) in one go, with the current commit     |
+| `list_instruction_files`, `read_instruction_file`       | Single files                                                                 |
+| `search_instructions`                                   | Full-text search (optionally regex)                                          |
+| `instructions_history`                                  | `git log`, optionally per file                                               |
+| `sync_instructions`                                     | Sync with the remote right now                                               |
+| `write_instruction_file`, `replace_in_instruction_file` | Only with `COACH_WRITE=1`; commits with "(by Claude)" appended and pushes    |
 
-Nur tracked Dateien werden ausgeliefert, Emacs-Backups (`*.~1~`) bleiben also außen vor,
-solange sie nicht eingecheckt sind (siehe `.gitignore` unten).
+Only tracked files are served, so editor backups stay out as long as they are not committed.
+The tool descriptions Claude sees are currently in German and refer to "Coach Claudi".
 
-## 1. Repository auf GitLab anlegen
+## 1. Instructions repository
 
-Auf dem Mac, im Ordner `Coach Claudi`:
+In the folder with your instructions:
 
 ```sh
-cd /Ordner/mit/den/Anweisungen
-printf '*~\n.#*\n.dir-locals.el\n' > .gitignore      # Backups raus; .dir-locals.el nach Wunsch behalten
+printf '*~\n.#*\n' > .gitignore      # keep editor backups out
 git init -b main
 git add .
-git commit -m "Coach-Claudi-Anweisungen"
-# Projekt auf gitlab.com anlegen (privat!), dann:
+git commit -m "Coach instructions"
+# create a PRIVATE project on your Git host, then:
 git remote add origin git@gitlab.com:<group>/<project>.git
 git push -u origin main
 ```
 
-Das Repository sollte **privat** sein (stehen persönliche Daten drin).
+Keep it **private** — coaching instructions usually contain personal data.
 
-## 2. Deploy Key
+## 2. Service user and deploy key
 
-Auf dem VPS:
+On the server:
 
 ```sh
 sudo useradd --system --home /var/lib/coach-mcp --shell /usr/sbin/nologin coach-mcp
@@ -52,87 +61,100 @@ sudo -u coach-mcp ssh-keygen -t ed25519 -N '' -C coach-mcp -f /var/lib/coach-mcp
 sudo cat /var/lib/coach-mcp/deploy_key.pub
 ```
 
-In GitLab: *Projekt → Settings → Repository → Deploy keys* → Public Key einfügen.
-Schreibrecht („Grant write permissions“) nur aktivieren, wenn Claudi Änderungen pushen soll.
-Ist `main` geschützt, den Key unter *Protected branches → Allowed to push* freigeben.
+Add the public key as a deploy key to the instructions repository:
 
-## 3. Installation auf dem VPS
+* **GitLab:** *Settings → Repository → Deploy keys*. If `main` is protected and Claude should
+  write, allow the key under *Protected branches → Allowed to push*.
+* **GitHub:** *Settings → Deploy keys*.
+
+Grant write access only if Claude should be able to push changes (`COACH_WRITE=1`).
+
+## 3. Install
 
 ```sh
-sudo git clone https://github.com/yokuha/coach-instruction-mcp.git /opt/coach-mcp/src
-cd /opt/coach-mcp/src
+VERSION=v0.1.0
+RAW=https://raw.githubusercontent.com/yokuha/coach-instruction-mcp/$VERSION/deploy
+
 sudo python3 -m venv /opt/coach-mcp/venv
-sudo /opt/coach-mcp/venv/bin/pip install .
+sudo /opt/coach-mcp/venv/bin/pip install "git+https://github.com/yokuha/coach-instruction-mcp@$VERSION"
 
-sudo cp deploy/coach-mcp.env.example /etc/coach-mcp.env
+sudo curl -fsSL -o /etc/coach-mcp.env "$RAW/coach-mcp.env.example"
 sudo chmod 600 /etc/coach-mcp.env
-sudo nano /etc/coach-mcp.env          # Repo-URL, zwei Tokens (openssl rand -hex 24), Host eintragen
+sudo nano /etc/coach-mcp.env          # repo URL, two tokens, hostname (see comments in the file)
 
-sudo cp deploy/coach-mcp.service /etc/systemd/system/
+sudo curl -fsSL -o /etc/systemd/system/coach-mcp.service "$RAW/coach-mcp.service"
 sudo systemctl daemon-reload
 sudo systemctl enable --now coach-mcp
-journalctl -u coach-mcp -f            # "Erster Abgleich: ok" erwarten
+journalctl -u coach-mcp -f            # expect "Initial sync: ok"
 curl -s http://127.0.0.1:8765/healthz
 ```
 
-Reverse Proxy und DNS: siehe `deploy/reverse-proxy.md`.
+Generate each token with `openssl rand -hex 24`.
 
-Update auf eine neue Version:
+Then add the hostname to your reverse proxy and DNS: see
+[deploy/reverse-proxy.md](deploy/reverse-proxy.md).
+
+**Updating** to a newer release:
 
 ```sh
-cd /opt/coach-mcp/src && sudo git pull
-sudo /opt/coach-mcp/venv/bin/pip install .
+sudo /opt/coach-mcp/venv/bin/pip install --upgrade "git+https://github.com/yokuha/coach-instruction-mcp@v0.1.0"
 sudo systemctl restart coach-mcp
 ```
 
-## 4. GitLab-Webhook (sofortige Aktualisierung)
+(Replace `v0.1.0` with the release you want; see
+[Releases](https://github.com/yokuha/coach-instruction-mcp/releases).)
 
-*Projekt → Settings → Webhooks*: URL `https://coach-mcp.domain.tld/hook/gitlab`,
-Secret token = `COACH_WEBHOOK_TOKEN`, Trigger „Push events“ (Branch `main`), SSL-Prüfung an.
-Ohne Webhook greifen trotzdem der Abgleich bei Zugriff (höchstens alle 20 s) und der
-Hintergrund-Abgleich (alle 5 min).
+Coming from v0.1.0: the command was renamed from `coach-mcp` to `coach-instruction-mcp`.
+Fetch the new `coach-mcp.service` (or change `ExecStart` accordingly) and run
+`sudo systemctl daemon-reload` before restarting.
+
+## 4. Webhook for instant updates (optional, GitLab)
+
+*Settings → Webhooks*: URL `https://coach-mcp.example.com/hook/gitlab`,
+secret token = `COACH_WEBHOOK_TOKEN`, trigger "Push events" (branch `main`), SSL verification on.
+
+Without a webhook (or on other hosts such as GitHub) the server still syncs on access (at most
+every 20 s) and in the background (every 5 min), so changes arrive with a short delay.
 
 ## 5. Connector in Claude
 
-*Einstellungen → Connectors → Benutzerdefinierten Connector hinzufügen*, URL:
+*Settings → Connectors → Add custom connector*, URL:
 
 ```
-https://coach-mcp.hostname.tld/<COACH_URL_TOKEN>/mcp
+https://coach-mcp.example.com/<COACH_URL_TOKEN>/mcp
 ```
 
-Kein OAuth eintragen. Danach in den Projekt-Anweisungen den Abschnitt zum Lesen des lokalen
-Ordners ersetzen, z. B.:
+Leave OAuth empty. Then tell Claude in your project instructions to use it, for example:
 
-> In jedem neuen Chat und vor relevanten Planungen, Änderungen oder Auswertungen rufst du
-> `get_instructions` vom Connector „Coach Claudi“ auf, wertest die Anweisungen aus und
-> berücksichtigst sie genauso wie diese Instruktionen. Änderungen an den Anweisungen schreibst
-> du nur nach meiner ausdrücklichen Zustimmung.
+> At the start of every new chat and before relevant planning, changes or analyses, call
+> `get_instructions` from the "Coach Claudi" connector and follow those instructions just like
+> these. Only change the instructions after my explicit approval.
 
-## Sicherheit
+## Security
 
-* Authentifizierung ist ein geheimer URL-Pfad (≥ 24 Zeichen, konstantzeitiger Vergleich),
-  denn claude.ai-Connectoren können keinen eigenen Bearer-Header senden. Der Pfad steht bei
-  Anthropic in deiner Connector-Konfiguration und im Reverse-Proxy-Log (Access-Log des Proxys
-  für diesen Host am besten abschalten; der Server selbst loggt keine Pfade). Bei Verdacht:
-  Token in `/etc/coach-mcp.env` wechseln, Dienst neu starten, Connector-URL anpassen.
-  Wer mehr will, braucht OAuth; das lässt sich später nachrüsten (`auth=` am `MCPServer`).
-* `COACH_ALLOWED_HOSTS` schützt gegen DNS-Rebinding.
-* Schreiben ist standardmäßig **aus**. Mit `COACH_WRITE=1` kann Claudi nur `.md`/`.txt`
-  im Repository ändern (kein `.git`, keine Pfad-Tricks, max. 200 kB), jede Änderung ist ein
-  Commit mit „(by Claude)“ und über `git revert` in GitLab rückgängig zu machen.
-  Hinweis: Wenn Claudi Text aus anderen Quellen verarbeitet (Webseiten, Notizen), könnte
-  darin versteckte Anweisung versuchen, die Coach-Anweisungen umzuschreiben. Deshalb der
-  Hinweis in den Tool-Beschreibungen „nur nach ausdrücklicher Zustimmung“; im Zweifel
-  Branch-Schutz plus Merge Request statt direktem Push nutzen (lässt sich nachrüsten).
-* Ein fehlgeschlagener Abgleich (GitLab nicht erreichbar) lässt den letzten Stand weiterlaufen;
-  der Fehler steht im Kopf jeder Antwort. Schreib-Tools brechen in dem Fall ab.
+* Authentication is a secret URL path (≥ 24 characters, constant-time comparison), because
+  claude.ai connectors cannot send a custom bearer header. The path is stored in your connector
+  configuration at Anthropic and appears in reverse proxy logs — best disable the proxy's access
+  log for this host (the server itself does not log paths). If in doubt: change the token in
+  `/etc/coach-mcp.env`, restart the service and update the connector URL. OAuth could be added
+  later (`auth=` on `MCPServer`).
+* `COACH_ALLOWED_HOSTS` protects against DNS rebinding.
+* Writing is **off** by default. With `COACH_WRITE=1` Claude can only change `.md`/`.txt` files
+  in the repository (no `.git`, no path tricks, max. 200 kB). Every change is a commit marked
+  "(by Claude)" and can be undone with `git revert`.
+  Note: if Claude processes text from other sources (web pages, notes), hidden instructions in
+  it could try to rewrite your coach instructions. That is why the tool descriptions say "only
+  after explicit approval"; if in doubt, protect the branch and use merge requests instead of
+  direct pushes.
+* If a sync fails (Git host unreachable), the last state keeps being served and the error is
+  shown at the top of every response. Write tools refuse to run in that case.
 
-## Test ohne GitLab
+## Local test
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/python test_local.py
 ```
 
-Der Test baut ein lokales Bare-Repo als Remote und prüft Lesen, Suche, externe Pushes,
-Webhook, Schreiben, Konflikte und Pfad-Schutz.
+The test uses a local bare repository as the remote and checks reading, search, external
+pushes, webhook, writing, conflicts and path protection.
