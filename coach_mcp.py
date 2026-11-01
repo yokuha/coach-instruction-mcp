@@ -10,6 +10,8 @@ Git repository (e.g. gitlab.com).
 * Write tools (only with COACH_WRITE=1): write_instruction_file,
   replace_in_instruction_file. Every change is committed and pushed; the Git history is the
   undo tool.
+* Access via OAuth (GitLab as authorization server, MCP endpoint /mcp) and/or the legacy
+  secret URL path /<COACH_URL_TOKEN>/mcp.
 
 Tool descriptions and tool output are German on purpose (that is what Claude sees).
 
@@ -18,6 +20,7 @@ Configured via environment variables only, see deploy/coach-mcp.env.example.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
@@ -26,6 +29,8 @@ import re
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path, PurePosixPath
 
 import anyio
@@ -51,7 +56,7 @@ REPO_URL = _env("COACH_REPO_URL", required=True)
 REPO_DIR = Path(_env("COACH_REPO_DIR", "/var/lib/coach-mcp/repo"))
 BRANCH = _env("COACH_BRANCH", "main")
 SSH_KEY = _env("COACH_SSH_KEY")  # path to the (private) deploy key; empty = default SSH config
-URL_TOKEN = _env("COACH_URL_TOKEN", required=True)  # secret path segment of the MCP URL
+URL_TOKEN = _env("COACH_URL_TOKEN")  # secret path segment of the legacy MCP URL; empty = off
 BEARER_TOKEN = _env("COACH_BEARER_TOKEN")  # optional additional check: Authorization: Bearer ...
 WEBHOOK_TOKEN = _env("COACH_WEBHOOK_TOKEN")  # GitLab "Secret token" (header X-Gitlab-Token)
 WRITE_ENABLED = _env("COACH_WRITE", "0") == "1"
@@ -60,14 +65,23 @@ SYNC_INTERVAL = float(_env("COACH_SYNC_INTERVAL", "300"))  # background sync
 HOST = _env("COACH_HOST", "127.0.0.1")
 PORT = int(_env("COACH_PORT", "8765"))
 ALLOWED_HOSTS = [h.strip() for h in _env("COACH_ALLOWED_HOSTS").split(",") if h.strip()]
+OAUTH_ISSUER = _env("COACH_OAUTH_ISSUER").rstrip("/")  # e.g. https://gitlab.com; empty = OAuth off
+OAUTH_CLIENT_ID = _env("COACH_OAUTH_CLIENT_ID")  # "Application ID" of the GitLab OAuth application
+OAUTH_SCOPE = "read_user"
+ALLOWED_USERS = {u.strip().lower() for u in _env("COACH_ALLOWED_USERS").split(",") if u.strip()}
+PUBLIC_URL = _env("COACH_PUBLIC_URL", f"https://{ALLOWED_HOSTS[0]}" if ALLOWED_HOSTS else "").rstrip("/")
 GIT_NAME = _env("COACH_GIT_NAME", "Coach Claudi")
 GIT_EMAIL = _env("COACH_GIT_EMAIL", "coach-claudi@localhost")
 TEXT_EXTENSIONS = {".md", ".txt"}
 MAX_FILE_BYTES = 200_000
 MAX_SEARCH_HITS = 50
 
-if len(URL_TOKEN) < 24:
+if not URL_TOKEN and not OAUTH_ISSUER:
+    raise SystemExit("Set COACH_URL_TOKEN and/or COACH_OAUTH_ISSUER (see deploy/coach-mcp.env.example)")
+if URL_TOKEN and len(URL_TOKEN) < 24:
     raise SystemExit("COACH_URL_TOKEN must be at least 24 characters long (e.g. openssl rand -hex 24)")
+if OAUTH_ISSUER and not (OAUTH_CLIENT_ID and ALLOWED_USERS and PUBLIC_URL):
+    raise SystemExit("OAuth needs COACH_OAUTH_CLIENT_ID, COACH_ALLOWED_USERS and COACH_PUBLIC_URL")
 
 # --------------------------------------------------------------------------- Git layer
 
@@ -352,6 +366,85 @@ if WRITE_ENABLED:
         return await _run(do_replace, path, old, new, commit_message)
 
 
+# --------------------------------------------------------------------------- OAuth (GitLab)
+
+TOKEN_CACHE_SECONDS = 600
+_token_cache: dict[str, tuple[float, str]] = {}  # sha256(token) -> (valid until, username)
+
+
+class AuthError(Exception):
+    def __init__(self, status: int, error: str, detail: str):
+        super().__init__(detail)
+        self.status = status
+        self.error = error
+
+
+def _gitlab_get(path: str, token: str) -> dict:
+    req = urllib.request.Request(
+        f"{OAUTH_ISSUER}{path}", headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise AuthError(401, "invalid_token", f"GitLab rejected the token ({exc.code})") from exc
+        raise AuthError(503, "temporarily_unavailable", f"GitLab answered {exc.code}") from exc
+    except (OSError, ValueError) as exc:
+        raise AuthError(503, "temporarily_unavailable", f"GitLab not reachable: {exc}") from exc
+
+
+def verify_gitlab_token(token: str) -> str:
+    """Returns the GitLab username for a valid token, otherwise raises AuthError.
+
+    GitLab tokens are not bound to this server (no audience), so a token only counts if it was
+    issued for our OAuth application and belongs to an allowed user. Results are cached for a
+    few minutes so that not every MCP request asks GitLab.
+    """
+    key = hashlib.sha256(token.encode()).hexdigest()
+    now = time.time()
+    cached = _token_cache.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
+    info = _gitlab_get("/oauth/token/info", token)
+    app_id = (info.get("application") or {}).get("uid") or ""
+    if not hmac.compare_digest(str(app_id).encode(), OAUTH_CLIENT_ID.encode()):
+        raise AuthError(401, "invalid_token", "token was issued for another application")
+    if OAUTH_SCOPE not in (info.get("scope") or []):
+        raise AuthError(403, "insufficient_scope", f"token lacks scope {OAUTH_SCOPE}")
+    username = str(_gitlab_get("/api/v4/user", token).get("username") or "").lower()
+    if username not in ALLOWED_USERS:
+        raise AuthError(403, "insufficient_scope", f"GitLab user {username!r} is not allowed")
+    expires_in = info.get("expires_in")
+    ttl = min(TOKEN_CACHE_SECONDS, expires_in) if isinstance(expires_in, (int, float)) else TOKEN_CACHE_SECONDS
+    for stale in [k for k, (until, _) in _token_cache.items() if until <= now]:
+        _token_cache.pop(stale, None)
+    _token_cache[key] = (now + ttl, username)
+    return username
+
+
+def _resource_metadata() -> dict:
+    """OAuth Protected Resource Metadata (RFC 9728): tells Claude to log in at GitLab."""
+    return {
+        "resource": f"{PUBLIC_URL}/mcp",
+        "authorization_servers": [OAUTH_ISSUER],
+        "scopes_supported": [OAUTH_SCOPE],
+        "bearer_methods_supported": ["header"],
+        "resource_name": "Coach Claudi instructions",
+    }
+
+
+def _auth_challenge(status: int, error: str = "", detail: str = "") -> Response:
+    challenge = (
+        f'Bearer resource_metadata="{PUBLIC_URL}/.well-known/oauth-protected-resource/mcp", '
+        f'scope="{OAUTH_SCOPE}"'
+    )
+    if error:
+        challenge += f', error="{error}", error_description="{detail}"'
+    body = {"error": error or "invalid_token", "error_description": detail or "authentication required"}
+    return JSONResponse(body, status_code=status, headers={"WWW-Authenticate": challenge})
+
+
 # --------------------------------------------------------------------------- HTTP wrapper
 
 
@@ -376,7 +469,7 @@ def _describe_rpc(body: bytes) -> str:
 
 
 class Gate:
-    """ASGI wrapper: secret URL path, optional bearer token, GitLab webhook, health check."""
+    """ASGI wrapper: OAuth or secret URL path, optional bearer token, GitLab webhook, health check."""
 
     def __init__(self, app):
         self.app = app
@@ -396,7 +489,7 @@ class Gate:
             ok = (
                 scope["method"] == "POST"
                 and WEBHOOK_TOKEN
-                and hmac.compare_digest(headers.get("x-gitlab-token", ""), WEBHOOK_TOKEN)
+                and hmac.compare_digest(headers.get("x-gitlab-token", "").encode(), WEBHOOK_TOKEN.encode())
             )
             if not ok:
                 await Response(status_code=404)(scope, receive, send)
@@ -405,19 +498,41 @@ class Gate:
             await Response("sync started", status_code=202)(scope, receive, send)
             return
 
-        segment = path.split("/")[1] if path.startswith("/") and len(path.split("/")) > 1 else ""
-        if not hmac.compare_digest(segment, URL_TOKEN):
+        if OAUTH_ISSUER and path.startswith("/.well-known/oauth-protected-resource"):
+            await JSONResponse(_resource_metadata())(scope, receive, send)
+            return
+
+        if OAUTH_ISSUER and path == "/mcp":
+            auth = headers.get("authorization", "")
+            token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+            if not token:
+                await _auth_challenge(401)(scope, receive, send)
+                return
+            try:
+                user = await anyio.to_thread.run_sync(verify_gitlab_token, token)
+            except AuthError as exc:
+                log.warning("MCP %s rejected: %s", scope["method"], exc)
+                await _auth_challenge(exc.status, exc.error, str(exc))(scope, receive, send)
+                return
+            await self._serve_logged(scope, receive, send, headers, user)
+            return
+
+        # Legacy access: /<COACH_URL_TOKEN>/mcp, forwarded to the inner app as /mcp
+        prefix = f"/{URL_TOKEN}"
+        if not URL_TOKEN or not hmac.compare_digest(path[: len(prefix) + 1].encode(), f"{prefix}/".encode()):
             await Response(status_code=404)(scope, receive, send)
             return
         if BEARER_TOKEN and not hmac.compare_digest(
-            headers.get("authorization", ""), f"Bearer {BEARER_TOKEN}"
+            headers.get("authorization", "").encode(), f"Bearer {BEARER_TOKEN}".encode()
         ):
             await Response(status_code=401)(scope, receive, send)
             log.warning("MCP %s rejected: wrong bearer token", scope["method"])
             return
-        await self._serve_logged(scope, receive, send, headers)
+        inner_path = path[len(prefix) :]
+        scope = {**scope, "path": inner_path, "raw_path": inner_path.encode()}
+        await self._serve_logged(scope, receive, send, headers, "url-token")
 
-    async def _serve_logged(self, scope, receive, send, headers):
+    async def _serve_logged(self, scope, receive, send, headers, user):
         """Passes the request on and logs one line per request, without the secret path."""
         body = bytearray()
         status = 0
@@ -439,12 +554,13 @@ class Gate:
             await self.app(scope, receive_tapped, send_tapped)
         finally:
             log.info(
-                "MCP %s %s -> %s in %d ms (client: %s)",
+                "MCP %s %s -> %s in %d ms (client: %s, user: %s)",
                 scope["method"],
                 _describe_rpc(bytes(body)) if body else "-",
                 status or "no response",
                 (time.monotonic() - start) * 1000,
                 headers.get("x-anthropic-client") or headers.get("user-agent", "?"),
+                user,
             )
 
 
@@ -461,7 +577,7 @@ def build_app():
         allowed_origins=[],
     )
     inner = mcp.streamable_http_app(
-        streamable_http_path=f"/{URL_TOKEN}/mcp",
+        streamable_http_path="/mcp",
         stateless_http=True,
         json_response=True,
         transport_security=security,
@@ -475,6 +591,11 @@ def main() -> None:
     log.info("Initial sync: %s", sync(force=True))
     threading.Thread(target=_background_sync, daemon=True).start()
     log.info("Writing %s, listening on %s:%s", "ENABLED" if WRITE_ENABLED else "disabled", HOST, PORT)
+    log.info(
+        "Access: OAuth via %s at %s/mcp (users: %s); secret URL path %s",
+        OAUTH_ISSUER or "-", PUBLIC_URL or "-", ", ".join(sorted(ALLOWED_USERS)) or "-",
+        "enabled" if URL_TOKEN else "disabled",
+    )
     # access_log=False: keep the secret URL path out of log files
     uvicorn.run(build_app(), host=HOST, port=PORT, access_log=False, log_level="info")
 

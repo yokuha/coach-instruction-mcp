@@ -1,23 +1,66 @@
-"""Local end-to-end test without GitLab: uses a local bare repository as the "remote".
+"""Local end-to-end test without GitLab: uses a local bare repository as the "remote" and a
+fake GitLab for the OAuth token checks.
 
 Run:  python test_local.py
 """
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import httpx2
 from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 
 HERE = Path(__file__).parent
 TOKEN = "t" * 32
 HOOK = "hooksecret"
+APP_ID = "app-123"
+# fake GitLab: access token -> (application uid, scopes, username)
+GITLAB_TOKENS = {
+    "good": (APP_ID, ["read_user"], "Yokuha"),
+    "other-app": ("app-999", ["read_user"], "yokuha"),
+    "no-scope": (APP_ID, ["openid"], "yokuha"),
+    "stranger": (APP_ID, ["read_user"], "mallory"),
+}
+gitlab_calls = []
+
+
+class FakeGitLab(BaseHTTPRequestHandler):
+    def do_GET(self):
+        token = self.headers.get("Authorization", "").removeprefix("Bearer ")
+        gitlab_calls.append((self.path, token))
+        if token not in GITLAB_TOKENS:
+            self.send_response(401)
+            self.end_headers()
+            return
+        uid, scopes, user = GITLAB_TOKENS[token]
+        if self.path == "/oauth/token/info":
+            body = {"resource_owner_id": 1, "scope": scopes, "expires_in": 7200, "application": {"uid": uid}}
+        elif self.path == "/api/v4/user":
+            body = {"id": 1, "username": user}
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        data = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
 
 
 def sh(*cmd, cwd=None):
@@ -58,6 +101,10 @@ async def main():
     sh("git", "commit", "-m", "init", cwd=seed)
     sh("git", "push", "origin", "HEAD:main", cwd=seed)
 
+    gitlab = HTTPServer(("127.0.0.1", 0), FakeGitLab)
+    threading.Thread(target=gitlab.serve_forever, daemon=True).start()
+    gitlab_url = f"http://127.0.0.1:{gitlab.server_address[1]}"
+
     port = free_port()
     env = {
         **os.environ,
@@ -70,6 +117,10 @@ async def main():
         "COACH_PORT": str(port),
         "COACH_ALLOWED_HOSTS": f"127.0.0.1:{port},localhost:{port}",
         "COACH_GIT_EMAIL": "claudi@test",
+        "COACH_OAUTH_ISSUER": gitlab_url,
+        "COACH_OAUTH_CLIENT_ID": APP_ID,
+        "COACH_ALLOWED_USERS": "yokuha",
+        "COACH_PUBLIC_URL": f"http://127.0.0.1:{port}",
     }
     proc = subprocess.Popen([sys.executable, str(HERE / "coach_mcp.py")], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -84,12 +135,35 @@ async def main():
             raise SystemExit("Server does not start:\n" + proc.stdout.read())
 
         base = f"http://127.0.0.1:{port}"
-        for bad in (f"{base}/falsch/mcp", f"{base}/mcp"):
+        for bad in (f"{base}/falsch/mcp", f"{base}/{TOKEN[:-1]}/mcp", f"{base}/ä/mcp"):
             try:
-                urllib.request.urlopen(bad)
+                urllib.request.urlopen(urllib.request.Request(bad.replace("ä", "%C3%A4"), method="POST"))
                 check("wrong path is rejected", False)
             except urllib.error.HTTPError as e:
                 check(f"wrong path {bad[len(base):]} -> 404", e.code == 404)
+
+        # OAuth: metadata, challenge, token checks
+        meta = json.load(urllib.request.urlopen(f"{base}/.well-known/oauth-protected-resource/mcp"))
+        check("resource metadata points to GitLab", meta["authorization_servers"] == [gitlab_url]
+              and meta["resource"] == f"{base}/mcp", meta)
+        for token, status in (("", 401), ("unknown", 401), ("other-app", 401), ("no-scope", 403), ("stranger", 403)):
+            req = urllib.request.Request(f"{base}/mcp", method="POST", data=b"{}",
+                                         headers={"Authorization": f"Bearer {token}"} if token else {})
+            try:
+                urllib.request.urlopen(req)
+                check(f"token {token!r} rejected", False)
+            except urllib.error.HTTPError as e:
+                challenge = e.headers.get("WWW-Authenticate", "")
+                check(f"token {token or '(none)'!r} -> {status} with challenge",
+                      e.code == status and "resource_metadata=" in challenge, (e.code, challenge))
+
+        oauth_http = httpx2.AsyncClient(headers={"Authorization": "Bearer good"})
+        async with Client(streamable_http_client(f"{base}/mcp", http_client=oauth_http)) as c:
+            check("OAuth: all 8 tools present", len((await c.list_tools()).tools) == 8)
+            err, text = await tool(c, "get_instructions")
+            check("OAuth: get_instructions works", not err and "Jahrgang 1900" in text, text[:300])
+        info_calls = [path for path, tok in gitlab_calls if tok == "good" and path == "/oauth/token/info"]
+        check("OAuth: token check is cached", len(info_calls) == 1, gitlab_calls)
 
         async with Client(f"{base}/{TOKEN}/mcp") as c:
             tools = {t.name for t in (await c.list_tools()).tools}
@@ -160,11 +234,14 @@ async def main():
         out = proc.communicate(timeout=5)[0]
         check("request log names the tool", "tools/call get_instructions -> 200" in out, out[-2000:])
         check("request log has no secret path", TOKEN not in out)
+        check("request log names the OAuth user", "user: yokuha" in out, out[-2000:])
+        check("request log has no OAuth token", "Bearer good" not in out)
         check("request log has no arguments", "Von Claudi geaendert" not in out)
         print("\nALL TESTS PASSED")
     finally:
         proc.terminate()
         proc.wait(5)
+        gitlab.shutdown()
 
 
 asyncio.run(main())

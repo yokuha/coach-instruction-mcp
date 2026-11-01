@@ -72,7 +72,7 @@ Grant write access only if Claude should be able to push changes (`COACH_WRITE=1
 ## 3. Install
 
 ```sh
-VERSION=v0.1.1
+VERSION=v0.2.0
 RAW=https://raw.githubusercontent.com/yokuha/coach-instruction-mcp/$VERSION/deploy
 
 sudo python3 -m venv /opt/coach-mcp/venv
@@ -97,11 +97,11 @@ Then add the hostname to your reverse proxy and DNS: see
 **Updating** to a newer release:
 
 ```sh
-sudo /opt/coach-mcp/venv/bin/pip install --upgrade "git+https://github.com/yokuha/coach-instruction-mcp@v0.1.1"
+sudo /opt/coach-mcp/venv/bin/pip install --upgrade "git+https://github.com/yokuha/coach-instruction-mcp@v0.2.0"
 sudo systemctl restart coach-mcp
 ```
 
-(Replace `v0.1.1` with the release you want; see
+(Replace `v0.2.0` with the release you want; see
 [Releases](https://github.com/yokuha/coach-instruction-mcp/releases).)
 
 Coming from v0.1.0: the command was renamed from `coach-mcp` to `coach-instruction-mcp`.
@@ -118,13 +118,39 @@ every 20 s) and in the background (every 5 min), so changes arrive with a short 
 
 ## 5. Connector in Claude
 
+There are two ways in. OAuth with a GitLab login is recommended; the secret URL path is the
+simpler, older way. Both can be active at the same time, which helps when switching.
+
+### a) OAuth with GitLab login (recommended)
+
+1. In GitLab, *User Settings → Applications → Add new application*: any name, redirect URI
+   `https://claude.ai/api/mcp/auth_callback` (check Claude's help center for the current callback
+   URL), "Confidential" on, scope **`read_user` only**. Note the *Application ID* and the *Secret*.
+2. In `/etc/coach-mcp.env` set `COACH_OAUTH_ISSUER=https://gitlab.com`,
+   `COACH_OAUTH_CLIENT_ID=<Application ID>`, `COACH_ALLOWED_USERS=<your GitLab username>` and,
+   if it differs from the first allowed host, `COACH_PUBLIC_URL`. Restart the service.
+3. In Claude, *Settings → Connectors → Add custom connector*, URL
+   `https://coach-mcp.example.com/mcp`; under *Advanced settings* enter the Application ID as
+   OAuth Client ID and the Secret as OAuth Client Secret. Connecting opens the GitLab login.
+
+The server asks GitLab whether each token was issued for exactly this application and belongs to
+an allowed user (cached for up to 10 minutes). The GitLab token only grants `read_user`; pushing
+still uses the deploy key. Once the OAuth connector works, remove the old connector and set
+`COACH_URL_TOKEN=` (empty) to turn off the secret URL.
+
+### b) Secret URL path
+
 *Settings → Connectors → Add custom connector*, URL:
 
 ```
 https://coach-mcp.example.com/<COACH_URL_TOKEN>/mcp
 ```
 
-Leave OAuth empty. Then tell Claude in your project instructions to use it, for example:
+Leave OAuth empty.
+
+### Project instructions
+
+Then tell Claude in your project instructions to use it, for example:
 
 > At the start of every new chat and before relevant planning, changes or analyses, call
 > `get_instructions` from the "Coach Claudi" connector and follow those instructions just like
@@ -132,15 +158,19 @@ Leave OAuth empty. Then tell Claude in your project instructions to use it, for 
 
 ## Security
 
-* Authentication is a secret URL path (≥ 24 characters, constant-time comparison), because
+* With OAuth, Claude sends a GitLab access token with every request. GitLab tokens are not
+  bound to a particular server, so the server only accepts tokens issued for your OAuth
+  application (`/oauth/token/info`) whose user is in `COACH_ALLOWED_USERS`. If GitLab is
+  unreachable, requests fail with 503 once the cached check (≤ 10 min) has expired.
+* The legacy secret URL path (≥ 24 characters, constant-time comparison) exists because
   claude.ai connectors cannot send a custom bearer header. The path is stored in your connector
   configuration at Anthropic and appears in reverse proxy logs — best disable the proxy's access
   log for this host. Caddy's `reverse_proxy` warnings (e.g. "aborting with incomplete
   response") also contain the full URI. The server itself logs one line per MCP request
-  (method, tool name, status, duration, client) but never the path or tool arguments, see
+  (method, tool name, status, duration, client, GitLab user) but never the path, tokens or tool
+  arguments, see
   `journalctl -u coach-mcp`. If in doubt: change the token in
-  `/etc/coach-mcp.env`, restart the service and update the connector URL. OAuth could be added
-  later (`auth=` on `MCPServer`).
+  `/etc/coach-mcp.env`, restart the service and update the connector URL — or switch to OAuth.
 * `COACH_ALLOWED_HOSTS` protects against DNS rebinding.
 * Writing is **off** by default. With `COACH_WRITE=1` Claude can only change `.md`/`.txt` files
   in the repository (no `.git`, no path tricks, max. 200 kB). Every change is a commit marked
