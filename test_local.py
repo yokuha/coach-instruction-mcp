@@ -155,6 +155,12 @@ async def main():
 
             err, text = await tool(c, "instructions_history", path="Ziele.md", limit=3)
             check("History", "konflikt" in text, text)
+
+        proc.terminate()
+        out = proc.communicate(timeout=5)[0]
+        check("request log names the tool", "tools/call get_instructions -> 200" in out, out[-2000:])
+        check("request log has no secret path", TOKEN not in out)
+        check("request log has no arguments", "Von Claudi geaendert" not in out)
         print("\nALL TESTS PASSED")
     finally:
         proc.terminate()

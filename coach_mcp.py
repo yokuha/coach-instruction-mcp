@@ -355,6 +355,26 @@ if WRITE_ENABLED:
 # --------------------------------------------------------------------------- HTTP wrapper
 
 
+def _describe_rpc(body: bytes) -> str:
+    """Summarizes a JSON-RPC request body for the log, e.g. 'tools/call get_instructions'.
+
+    Only method and tool name are logged, never arguments (they may contain instruction text).
+    """
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return "unparsable body"
+    parts = []
+    for msg in payload if isinstance(payload, list) else [payload]:
+        if not isinstance(msg, dict):
+            continue
+        method = msg.get("method") or ("response" if "result" in msg or "error" in msg else "?")
+        params = msg.get("params")
+        name = params.get("name") if method == "tools/call" and isinstance(params, dict) else None
+        parts.append(f"{method} {name}" if isinstance(name, str) else str(method))
+    return ", ".join(parts) or "empty batch"
+
+
 class Gate:
     """ASGI wrapper: secret URL path, optional bearer token, GitLab webhook, health check."""
 
@@ -393,8 +413,39 @@ class Gate:
             headers.get("authorization", ""), f"Bearer {BEARER_TOKEN}"
         ):
             await Response(status_code=401)(scope, receive, send)
+            log.warning("MCP %s rejected: wrong bearer token", scope["method"])
             return
-        await self.app(scope, receive, send)
+        await self._serve_logged(scope, receive, send, headers)
+
+    async def _serve_logged(self, scope, receive, send, headers):
+        """Passes the request on and logs one line per request, without the secret path."""
+        body = bytearray()
+        status = 0
+        start = time.monotonic()
+
+        async def receive_tapped():
+            message = await receive()
+            if message["type"] == "http.request":
+                body.extend(message.get("body", b""))
+            return message
+
+        async def send_tapped(message):
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, receive_tapped, send_tapped)
+        finally:
+            log.info(
+                "MCP %s %s -> %s in %d ms (client: %s)",
+                scope["method"],
+                _describe_rpc(bytes(body)) if body else "-",
+                status or "no response",
+                (time.monotonic() - start) * 1000,
+                headers.get("x-anthropic-client") or headers.get("user-agent", "?"),
+            )
 
 
 def _background_sync() -> None:
